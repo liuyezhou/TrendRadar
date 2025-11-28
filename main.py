@@ -4488,6 +4488,7 @@ class NewsAnalyzer:
         return any(
             [
                 CONFIG["FEISHU_WEBHOOK_URL"],
+                CONFIG["FEISHU_OUTSIDE_WEBHOOK_URL"],
                 CONFIG["DINGTALK_WEBHOOK_URL"],
                 CONFIG["WEWORK_WEBHOOK_URL"],
                 (CONFIG["TELEGRAM_BOT_TOKEN"] and CONFIG["TELEGRAM_CHAT_ID"]),
