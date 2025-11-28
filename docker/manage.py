@@ -273,6 +273,7 @@ def show_config():
         "RUN_MODE",
         "IMMEDIATE_RUN",
         "FEISHU_WEBHOOK_URL",
+        "FEISHU_OUTSIDE_WEBHOOK_URL",
         "DINGTALK_WEBHOOK_URL",
         "WEWORK_WEBHOOK_URL",
         "TELEGRAM_BOT_TOKEN",

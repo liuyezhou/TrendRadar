@@ -152,6 +152,9 @@ def load_config():
     config["FEISHU_WEBHOOK_URL"] = os.environ.get(
         "FEISHU_WEBHOOK_URL", ""
     ).strip() or webhooks.get("feishu_url", "")
+    config["FEISHU_OUTSIDE_WEBHOOK_URL"] = os.environ.get(
+        "FEISHU_OUTSIDE_WEBHOOK_URL", ""
+    ).strip() or webhooks.get("feishu_outside_url", "")
     config["DINGTALK_WEBHOOK_URL"] = os.environ.get(
         "DINGTALK_WEBHOOK_URL", ""
     ).strip() or webhooks.get("dingtalk_url", "")
@@ -213,6 +216,9 @@ def load_config():
     if config["FEISHU_WEBHOOK_URL"]:
         source = "环境变量" if os.environ.get("FEISHU_WEBHOOK_URL") else "配置文件"
         notification_sources.append(f"飞书({source})")
+    if config["FEISHU_OUTSIDE_WEBHOOK_URL"]:
+        source = "环境变量" if os.environ.get("FEISHU_OUTSIDE_WEBHOOK_URL") else "配置文件"
+        notification_sources.append(f"飞书外部群({source})")
     if config["DINGTALK_WEBHOOK_URL"]:
         source = "环境变量" if os.environ.get("DINGTALK_WEBHOOK_URL") else "配置文件"
         notification_sources.append(f"钉钉({source})")
@@ -3409,6 +3415,7 @@ def send_to_notifications(
     report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
 
     feishu_url = CONFIG["FEISHU_WEBHOOK_URL"]
+    feishu_outside_url = CONFIG["FEISHU_OUTSIDE_WEBHOOK_URL"]
     dingtalk_url = CONFIG["DINGTALK_WEBHOOK_URL"]
     wework_url = CONFIG["WEWORK_WEBHOOK_URL"]
     telegram_token = CONFIG["TELEGRAM_BOT_TOKEN"]
@@ -3430,6 +3437,12 @@ def send_to_notifications(
     if feishu_url:
         results["feishu"] = send_to_feishu(
             feishu_url, report_data, report_type, update_info_to_send, proxy_url, mode
+        )
+
+    # 发送到飞书外部群
+    if feishu_outside_url:
+        results["feishu"] = send_to_feishu(
+            feishu_outside_url, report_data, report_type, update_info_to_send, proxy_url, mode, True
         )
 
     # 发送到钉钉
@@ -3525,6 +3538,7 @@ def send_to_feishu(
     update_info: Optional[Dict] = None,
     proxy_url: Optional[str] = None,
     mode: str = "daily",
+    use_compatiable_format=False,
 ) -> bool:
     """发送到飞书（支持分批发送）"""
     headers = {"Content-Type": "application/json"}
@@ -3535,7 +3549,7 @@ def send_to_feishu(
     # 获取分批内容，使用飞书专用的批次大小
     batches = split_content_into_batches(
         report_data,
-        "feishu",
+        "wework" if use_compatiable_format else "feishu",
         update_info,
         max_bytes=CONFIG.get("FEISHU_BATCH_SIZE", 29000),
         mode=mode,
