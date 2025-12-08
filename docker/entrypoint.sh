@@ -17,7 +17,14 @@ case "${RUN_MODE:-cron}" in
     ;;
 "cron")
     # 生成 crontab
-    echo "${CRON_SCHEDULE:-*/30 * * * *} cd /app && /usr/local/bin/python main.py" > /tmp/crontab
+    IFS=',' read -ra RULES <<< "$CRON_SCHEDULE"
+    {
+    for rule in "${RULES[@]}"; do
+        rule="$(echo "$rule" | xargs)"  # 去掉前后空格
+        echo "$rule cd /app && /usr/local/bin/python main.py"
+    done
+    } > /tmp/crontab
+
     
     echo "📅 生成的crontab内容:"
     cat /tmp/crontab

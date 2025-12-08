@@ -25,6 +25,7 @@ if ! command -v uv &> /dev/null; then
     echo "提示: UV 是一个快速的 Python 包管理器，只需安装一次"
     echo ""
     curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.local/bin/env
 
     echo ""
     echo "正在刷新 PATH 环境变量..."
@@ -50,8 +51,6 @@ if ! command -v uv &> /dev/null; then
     fi
 
     echo -e "${GREEN}✅ [成功] UV 已安装${NC}"
-    echo -e "${YELLOW}⚠️  请重新运行此脚本以继续${NC}"
-    exit 0
 else
     echo -e "${GREEN}[1/3] ✅ UV 已安装${NC}"
     uv --version

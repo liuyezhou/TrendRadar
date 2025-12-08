@@ -1,0 +1,45 @@
+# docker-compose.yml
+version: '3.8'
+services:
+  vllm:
+    image: vllm/vllm-openai:latest  # vLLM >=0.5.0 支持 AWQ
+    restart: "no"                   # 由于定时总结新闻，不需要vllm service 常驻
+    runtime: nvidia
+    ports:
+      - "8000:8000"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    command: >
+      --model Qwen/Qwen3-30B-A3B-Instruct-2507
+      --dtype bfloat16
+      --max-model-len 32768
+      --tensor-parallel-size 1
+      --port 8000
+      --disable-log-stats
+      --enable-chunked-prefill
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+      --chat-template-content-format auto
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      interval: 10s        # 每 10 秒检查一次
+      timeout: 5s
+      retries: 30          # 模型加载可能需要几十秒甚至几分钟
+      start_period: 60s    # 给它足够的加载时间
+
+  agent:
+    build:
+      context: ..
+      dockerfile: vllm_server/Dockerfile
+    env_file: ../docker/.env
+    restart: "no"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../output:/TrendRadar/output:ro   # 只读挂载（推荐）
+    depends_on:
+      vllm:
+        condition: service_healthy
