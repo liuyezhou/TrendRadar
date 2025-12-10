@@ -4,7 +4,9 @@
 提供统一的数据查询接口,封装数据访问逻辑。
 """
 
-import re
+import os
+import psycopg
+from psycopg.rows import dict_row
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -17,16 +19,22 @@ from ..utils.errors import DataNotFoundError
 class DataService:
     """数据访问服务类"""
 
-    def __init__(self, project_root: str = None):
+    def __init__(self, project_root, db_url: Optional[str] = None):
         """
         初始化数据服务
 
         Args:
-            project_root: 项目根目录
+            db_url: PostgreSQL 连接字符串，如 postgresql://user:pass@localhost:5432/db
+                    如果未提供，则从环境变量 DATABASE_URL 读取
         """
+        self.project_root = project_root
         self.parser = ParserService(project_root)
+        self.db_url = db_url
         self.cache = get_cache()
 
+    def _get_conn(self):
+        return psycopg.connect(self.db_url, row_factory=dict_row)
+    
     def get_latest_news(
         self,
         platforms: Optional[List[str]] = None,
@@ -34,72 +42,55 @@ class DataService:
         include_url: bool = False
     ) -> List[Dict]:
         """
-        获取最新一批爬取的新闻数据
-
-        Args:
-            platforms: 平台ID列表,None表示所有平台
-            limit: 返回条数限制
-            include_url: 是否包含URL链接,默认False(节省token)
-
-        Returns:
-            新闻列表
-
-        Raises:
-            DataNotFoundError: 数据不存在
+        获取最新一批爬取的新闻数据（按 updated_at 最晚的批次）
         """
-        # 尝试从缓存获取
-        cache_key = f"latest_news:{','.join(platforms or [])}:{limit}:{include_url}"
-        cached = self.cache.get(cache_key, ttl=900)  # 15分钟缓存
-        if cached:
-            return cached
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 找出今天最新的 updated_at 时间
+                where_clause = "created_at >= CURRENT_DATE"
+                params = []
+                if platforms:
+                    placeholders = ','.join(['%s'] * len(platforms))
+                    where_clause += f" AND source_id = ANY(ARRAY[{placeholders}])"
+                    params = platforms
 
-        # 读取今天的数据
-        all_titles, id_to_name, timestamps = self.parser.read_all_titles_for_date(
-            date=None,
-            platform_ids=platforms
-        )
+                cur.execute(f"""
+                    SELECT MAX(updated_at) as latest_time
+                    FROM news_items
+                    WHERE {where_clause}
+                """, params)
+                latest_time = cur.fetchone()['latest_time']
+                if not latest_time:
+                    raise DataNotFoundError("未找到今天的新闻数据")
 
-        # 获取最新的文件时间
-        if timestamps:
-            latest_timestamp = max(timestamps.values())
-            fetch_time = datetime.fromtimestamp(latest_timestamp)
-        else:
-            fetch_time = datetime.now()
+                # 2. 获取该时间点的所有新闻
+                cur.execute(f"""
+                    SELECT title, source_id, source_name, rank, url, mobile_url, updated_at
+                    FROM news_items
+                    WHERE updated_at = %s AND {where_clause}
+                    ORDER BY (rank[1]) ASC NULLS LAST
+                    LIMIT %s
+                """, [latest_time] + params + [limit])
 
-        # 转换为新闻列表
-        news_list = []
-        for platform_id, titles in all_titles.items():
-            platform_name = id_to_name.get(platform_id, platform_id)
+                results = []
+                for row in cur.fetchall():
+                    # 取第一个排名（rank[1] 对应 SQL 中的 rank[1]）
+                    ranks = row['rank'] or []
+                    rank = ranks[0] if ranks else 0
 
-            for title, info in titles.items():
-                # 取第一个排名
-                rank = info["ranks"][0] if info["ranks"] else 0
+                    item = {
+                        "title": row['title'],
+                        "platform": row['source_id'],
+                        "platform_name": row['source_name'],
+                        "rank": rank,
+                        "timestamp": row['updated_at'].strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    if include_url:
+                        item["url"] = row['url'] or ""
+                        item["mobileUrl"] = row['mobile_url'] or ""
+                    results.append(item)
 
-                news_item = {
-                    "title": title,
-                    "platform": platform_id,
-                    "platform_name": platform_name,
-                    "rank": rank,
-                    "timestamp": fetch_time.strftime("%Y-%m-%d %H:%M:%S")
-                }
-
-                # 条件性添加 URL 字段
-                if include_url:
-                    news_item["url"] = info.get("url", "")
-                    news_item["mobileUrl"] = info.get("mobileUrl", "")
-
-                news_list.append(news_item)
-
-        # 按排名排序
-        news_list.sort(key=lambda x: x["rank"])
-
-        # 限制返回数量
-        result = news_list[:limit]
-
-        # 缓存结果
-        self.cache.set(cache_key, result)
-
-        return result
+                return results
 
     def get_news_by_date(
         self,
@@ -109,78 +100,51 @@ class DataService:
         include_url: bool = False
     ) -> List[Dict]:
         """
-        按指定日期获取新闻
-
-        Args:
-            target_date: 目标日期
-            platforms: 平台ID列表,None表示所有平台
-            limit: 返回条数限制
-            include_url: 是否包含URL链接,默认False(节省token)
-
-        Returns:
-            新闻列表
-
-        Raises:
-            DataNotFoundError: 数据不存在
-
-        Examples:
-            >>> service = DataService()
-            >>> news = service.get_news_by_date(
-            ...     target_date=datetime(2025, 10, 10),
-            ...     platforms=['zhihu'],
-            ...     limit=20
-            ... )
+        按指定日期获取新闻（按当天所有新闻的首次出现排名排序）
         """
-        # 尝试从缓存获取
         date_str = target_date.strftime("%Y-%m-%d")
-        cache_key = f"news_by_date:{date_str}:{','.join(platforms or [])}:{limit}:{include_url}"
-        cached = self.cache.get(cache_key, ttl=1800)  # 30分钟缓存
-        if cached:
-            return cached
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                where_clause = "created_at >= %s AND created_at < %s"
+                params = [target_date, target_date + timedelta(days=1)]
+                if platforms:
+                    placeholders = ','.join(['%s'] * len(platforms))
+                    where_clause += f" AND source_id = ANY(ARRAY[{placeholders}])"
+                    params += platforms
 
-        # 读取指定日期的数据
-        all_titles, id_to_name, timestamps = self.parser.read_all_titles_for_date(
-            date=target_date,
-            platform_ids=platforms
-        )
+                cur.execute(f"""
+                    SELECT title, source_id, source_name, rank, url, mobile_url, crawl_count
+                    FROM news_items
+                    WHERE {where_clause}
+                    ORDER BY (rank[1]) ASC NULLS LAST
+                    LIMIT %s
+                """, params + [limit])
 
-        # 转换为新闻列表
-        news_list = []
-        for platform_id, titles in all_titles.items():
-            platform_name = id_to_name.get(platform_id, platform_id)
+                results = []
+                for row in cur.fetchall():
+                    ranks = row['rank'] or []
+                    rank = ranks[0] if ranks else 0
+                    avg_rank = sum(ranks) / len(ranks) if ranks else 0
 
-            for title, info in titles.items():
-                # 计算平均排名
-                avg_rank = sum(info["ranks"]) / len(info["ranks"]) if info["ranks"] else 0
+                    item = {
+                        "title": row['title'],
+                        "platform": row['source_id'],
+                        "platform_name": row['source_name'],
+                        "rank": rank,
+                        "avg_rank": round(avg_rank, 2),
+                        "count": row['crawl_count'],
+                        "date": date_str
+                    }
+                    if include_url:
+                        item["url"] = row['url'] or ""
+                        item["mobileUrl"] = row['mobile_url'] or ""
+                    results.append(item)
 
-                news_item = {
-                    "title": title,
-                    "platform": platform_id,
-                    "platform_name": platform_name,
-                    "rank": info["ranks"][0] if info["ranks"] else 0,
-                    "avg_rank": round(avg_rank, 2),
-                    "count": len(info["ranks"]),
-                    "date": date_str
-                }
+                if not results:
+                    raise DataNotFoundError(f"未找到 {date_str} 的新闻数据")
 
-                # 条件性添加 URL 字段
-                if include_url:
-                    news_item["url"] = info.get("url", "")
-                    news_item["mobileUrl"] = info.get("mobileUrl", "")
-
-                news_list.append(news_item)
-
-        # 按排名排序
-        news_list.sort(key=lambda x: x["rank"])
-
-        # 限制返回数量
-        result = news_list[:limit]
-
-        # 缓存结果(历史数据缓存更久)
-        self.cache.set(cache_key, result)
-
-        return result
-
+                return results
+    
     def search_news_by_keyword(
         self,
         keyword: str,
@@ -190,97 +154,79 @@ class DataService:
     ) -> Dict:
         """
         按关键词搜索新闻
-
-        Args:
-            keyword: 搜索关键词
-            date_range: 日期范围 (start_date, end_date)
-            platforms: 平台过滤列表
-            limit: 返回条数限制(可选)
-
-        Returns:
-            搜索结果字典
-
-        Raises:
-            DataNotFoundError: 数据不存在
         """
-        # 确定搜索日期范围
         if date_range:
             start_date, end_date = date_range
         else:
-            # 默认搜索今天
-            start_date = end_date = datetime.now()
+            now = datetime.now()
+            start_date = end_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # 收集所有匹配的新闻
-        results = []
-        platform_distribution = Counter()
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                where_clause = "title ILIKE %s"
+                params = [f"%{keyword}%"]
 
-        # 遍历日期范围
-        current_date = start_date
-        while current_date <= end_date:
-            try:
-                all_titles, id_to_name, _ = self.parser.read_all_titles_for_date(
-                    date=current_date,
-                    platform_ids=platforms
-                )
+                # 日期范围
+                where_clause += " AND created_at >= %s AND created_at <= %s"
+                params += [start_date, end_date + timedelta(days=1)]
 
-                # 搜索包含关键词的标题
-                for platform_id, titles in all_titles.items():
-                    platform_name = id_to_name.get(platform_id, platform_id)
+                if platforms:
+                    placeholders = ','.join(['%s'] * len(platforms))
+                    where_clause += f" AND source_id = ANY(ARRAY[{placeholders}])"
+                    params += platforms
 
-                    for title, info in titles.items():
-                        if keyword.lower() in title.lower():
-                            # 计算平均排名
-                            avg_rank = sum(info["ranks"]) / len(info["ranks"]) if info["ranks"] else 0
+                # 查询匹配新闻
+                cur.execute(f"""
+                    SELECT title, source_id, source_name, rank, url, mobile_url, created_at
+                    FROM news_items
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                """, params)
 
-                            results.append({
-                                "title": title,
-                                "platform": platform_id,
-                                "platform_name": platform_name,
-                                "ranks": info["ranks"],
-                                "count": len(info["ranks"]),
-                                "avg_rank": round(avg_rank, 2),
-                                "url": info.get("url", ""),
-                                "mobileUrl": info.get("mobileUrl", ""),
-                                "date": current_date.strftime("%Y-%m-%d")
-                            })
+                results = []
+                platform_distribution = Counter()
+                total_ranks = []
 
-                            platform_distribution[platform_id] += 1
+                for row in cur.fetchall():
+                    ranks = row['rank'] or []
+                    avg_rank = sum(ranks) / len(ranks) if ranks else 0
+                    total_ranks.extend(ranks)
 
-            except DataNotFoundError:
-                # 该日期没有数据,继续下一天
-                pass
+                    item = {
+                        "title": row['title'],
+                        "platform": row['source_id'],
+                        "platform_name": row['source_name'],
+                        "ranks": ranks,
+                        "count": len(ranks),
+                        "avg_rank": round(avg_rank, 2),
+                        "url": row['url'] or "",
+                        "mobileUrl": row['mobile_url'] or "",
+                        "date": row['created_at'].strftime("%Y-%m-%d")
+                    }
+                    results.append(item)
+                    platform_distribution[row['source_id']] += 1
 
-            # 下一天
-            current_date += timedelta(days=1)
+                if not results:
+                    raise DataNotFoundError(
+                        f"未找到包含关键词 '{keyword}' 的新闻",
+                        suggestion="请尝试其他关键词或扩大日期范围"
+                    )
 
-        if not results:
-            raise DataNotFoundError(
-                f"未找到包含关键词 '{keyword}' 的新闻",
-                suggestion="请尝试其他关键词或扩大日期范围"
-            )
+                avg_rank = sum(total_ranks) / len(total_ranks) if total_ranks else 0
+                total_found = len(results)
+                if limit and limit > 0:
+                    results = results[:limit]
 
-        # 计算统计信息
-        total_ranks = []
-        for item in results:
-            total_ranks.extend(item["ranks"])
-
-        avg_rank = sum(total_ranks) / len(total_ranks) if total_ranks else 0
-
-        # 限制返回数量(如果指定)
-        total_found = len(results)
-        if limit is not None and limit > 0:
-            results = results[:limit]
-
-        return {
-            "results": results,
-            "total": len(results),
-            "total_found": total_found,
-            "statistics": {
-                "platform_distribution": dict(platform_distribution),
-                "avg_rank": round(avg_rank, 2),
-                "keyword": keyword
-            }
-        }
+                return {
+                    "results": results,
+                    "total": len(results),
+                    "total_found": total_found,
+                    "statistics": {
+                        "platform_distribution": dict(platform_distribution),
+                        "avg_rank": round(avg_rank, 2),
+                        "keyword": keyword
+                    }
+                }
 
     def get_trending_topics(
         self,
@@ -288,118 +234,102 @@ class DataService:
         mode: str = "current"
     ) -> Dict:
         """
-        获取个人关注词的新闻出现频率统计
-
-        注意:本工具基于 config/frequency_words.txt 中的个人关注词列表进行统计,
-        而不是自动从新闻中提取热点话题。用户可以自定义这个关注词列表。
-
+        基于 PostgreSQL 数据库实现的热点词频统计
         Args:
-            top_n: 返回TOP N关注词
-            mode: 模式 - daily(当日累计), current(最新一批)
-
-        Returns:
-            关注词频率统计字典
-
-        Raises:
-            DataNotFoundError: 数据不存在
+            top_n: 返回 TOP N 词
+            mode: "daily"（全天）或 "current"（最新批次）
         """
-        # 尝试从缓存获取
-        cache_key = f"trending_topics:{top_n}:{mode}"
-        cached = self.cache.get(cache_key, ttl=1800)  # 30分钟缓存
-        if cached:
-            return cached
+        if mode not in ("daily", "current"):
+            raise ValueError("mode 必须是 'daily' 或 'current'")
 
-        # 读取今天的数据
-        all_titles, id_to_name, timestamps = self.parser.read_all_titles_for_date()
+        # 1. 加载 frequency_words 配置
+        try:
+            word_groups, filter_words, global_filters = self._load_frequency_words()
+        except Exception as e:
+            raise DataNotFoundError(f"加载 frequency_words 失败: {e}")
 
-        if not all_titles:
-            raise DataNotFoundError(
-                "未找到今天的新闻数据",
-                suggestion="请确保爬虫已经运行并生成了数据"
-            )
+        # 2. 构建 SQL 查询条件
+        today = datetime.now().strftime("%Y-%m-%d")
+        if mode == "current":
+            # 只查最新一批（latest updated_at）
+            sql = """
+                SELECT title, source_id
+                FROM news_items
+                WHERE created_at >= %s
+                  AND updated_at = (
+                      SELECT MAX(updated_at)
+                      FROM news_items
+                      WHERE created_at >= %s
+                  )
+            """
+            params = [today, today]
+        else:  # mode == "daily"
+            sql = "SELECT title, source_id FROM news_items WHERE created_at >= %s"
+            params = [today]
 
-        # 加载关键词配置
-        word_groups = self.parser.parse_frequency_words()
+        # 3. 执行查询
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
 
-        # 根据mode选择要处理的标题数据
-        titles_to_process = {}
+        if not rows:
+            raise DataNotFoundError("今日无新闻数据")
 
-        if mode == "daily":
-            # daily模式:处理当天所有累计数据
-            titles_to_process = all_titles
-
-        elif mode == "current":
-            # current模式:只处理最新一批数据(最新时间戳的文件)
-            if timestamps:
-                # 找出最新的时间戳
-                latest_timestamp = max(timestamps.values())
-
-                # 重新读取,只获取最新时间的数据
-                # 这里我们通过timestamps字典反查找最新文件对应的平台
-                latest_titles, _, _ = self.parser.read_all_titles_for_date()
-
-                # 由于read_all_titles_for_date返回所有文件的合并数据,
-                # 我们需要通过timestamps来过滤出最新批次
-                # 简化实现:使用当前所有数据作为最新批次
-                # (更精确的实现需要解析服务支持按时间过滤)
-                titles_to_process = latest_titles
-            else:
-                titles_to_process = all_titles
-
-        else:
-            raise ValueError(
-                f"不支持的模式: {mode}。支持的模式: daily, current"
-            )
-
-        # 统计词频
+        # 4. 词频统计
         word_frequency = Counter()
-        keyword_to_news = {}
+        keyword_to_titles = {}
 
-        # 遍历要处理的标题
-        for platform_id, titles in titles_to_process.items():
-            for title in titles.keys():
-                # 对每个关键词组进行匹配
-                for group in word_groups:
-                    all_words = group.get("required", []) + group.get("normal", [])
+        for row in rows:
+            title = row['title']
+            title_lower = title.lower()
 
-                    for word in all_words:
-                        if word and word in title:
-                            word_frequency[word] += 1
+            # 全局过滤
+            if global_filters and any(gf.lower() in title_lower for gf in global_filters):
+                continue
 
-                            if word not in keyword_to_news:
-                                keyword_to_news[word] = []
-                            keyword_to_news[word].append(title)
+            # 过滤词
+            if any(fw.lower() in title_lower for fw in filter_words):
+                continue
 
-        # 获取TOP N关键词
+            # 词组匹配
+            for group in word_groups:
+                required = group["required"]
+                normal = group["normal"]
+
+                if required and not all(rw.lower() in title_lower for rw in required):
+                    continue
+                if normal and not any(nw.lower() in title_lower for nw in normal):
+                    continue
+
+                # 匹配成功，统计所有关键词
+                for word in (required + normal):
+                    if word:
+                        word_frequency[word] += 1
+                        if word not in keyword_to_titles:
+                            keyword_to_titles[word] = set()
+                        keyword_to_titles[word].add(title)
+
+        # 5. 构建结果
         top_keywords = word_frequency.most_common(top_n)
-
-        # 构建话题列表
         topics = []
-        for keyword, frequency in top_keywords:
-            matched_news = keyword_to_news.get(keyword, [])
-
+        for keyword, freq in top_keywords:
             topics.append({
                 "keyword": keyword,
-                "frequency": frequency,
-                "matched_news": len(set(matched_news)),  # 去重后的新闻数量
-                "trend": "stable",  # TODO: 需要历史数据来计算趋势
-                "weight_score": 0.0  # TODO: 需要实现权重计算
+                "frequency": freq,
+                "matched_news": len(keyword_to_titles[keyword]),
+                "trend": "stable",
+                "weight_score": 0.0
             })
 
-        # 构建结果
-        result = {
+        return {
             "topics": topics,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "mode": mode,
             "total_keywords": len(word_frequency),
-            "description": self._get_mode_description(mode)
+            "description": "当日累计统计" if mode == "daily" else "最新一批统计"
         }
-
-        # 缓存结果
-        self.cache.set(cache_key, result)
-
-        return result
-
+    
     def _get_mode_description(self, mode: str) -> str:
         """获取模式描述"""
         descriptions = {
@@ -497,91 +427,63 @@ class DataService:
 
     def get_available_date_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
         """
-        扫描 output 目录，返回实际可用的日期范围
-
-        Returns:
-            (最早日期, 最新日期) 元组，如果没有数据则返回 (None, None)
-
-        Examples:
-            >>> service = DataService()
-            >>> earliest, latest = service.get_available_date_range()
-            >>> print(f"可用日期范围：{earliest} 至 {latest}")
+        获取数据库中实际可用的日期范围
         """
-        output_dir = self.parser.project_root / "output"
-
-        if not output_dir.exists():
-            return (None, None)
-
-        available_dates = []
-
-        # 遍历日期文件夹
-        for date_folder in output_dir.iterdir():
-            if date_folder.is_dir() and not date_folder.name.startswith('.'):
-                # 解析日期（格式: YYYY年MM月DD日）
-                try:
-                    date_match = re.match(r'(\d{4})年(\d{2})月(\d{2})日', date_folder.name)
-                    if date_match:
-                        folder_date = datetime(
-                            int(date_match.group(1)),
-                            int(date_match.group(2)),
-                            int(date_match.group(3))
-                        )
-                        available_dates.append(folder_date)
-                except Exception:
-                    pass
-
-        if not available_dates:
-            return (None, None)
-
-        return (min(available_dates), max(available_dates))
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MIN(created_at), MAX(created_at) FROM news_items")
+                row = cur.fetchone()
+                min_time = row[0]
+                max_time = row[1]
+                if min_time is None:
+                    return (None, None)
+                # 转为日期（不带时分秒）
+                earliest = min_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                latest = max_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                return (earliest, latest)
+            
 
     def get_system_status(self) -> Dict:
         """
-        获取系统运行状态
+        获取系统运行状态（基于 PostgreSQL 数据库）
 
         Returns:
             系统状态字典
         """
-        # 获取数据统计
-        output_dir = self.parser.project_root / "output"
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 从 news_items 表获取数据统计
+                cur.execute("""
+                    SELECT 
+                        COUNT(*) as total_news,
+                        MIN(created_at) as oldest_record,
+                        MAX(created_at) as latest_record,
+                        pg_total_relation_size('news_items') as table_size
+                    FROM news_items
+                """)
+                news_stats = cur.fetchone()
 
-        total_storage = 0
-        oldest_record = None
-        latest_record = None
-        total_news = 0
+                total_news = news_stats['total_news'] or 0
+                oldest_record = news_stats['oldest_record']
+                latest_record = news_stats['latest_record']
+                news_table_size = news_stats['table_size'] or 0
 
-        if output_dir.exists():
-            # 遍历日期文件夹
-            for date_folder in output_dir.iterdir():
-                if date_folder.is_dir():
-                    # 解析日期
-                    try:
-                        date_str = date_folder.name
-                        # 格式: YYYY年MM月DD日
-                        date_match = re.match(r'(\d{4})年(\d{2})月(\d{2})日', date_str)
-                        if date_match:
-                            folder_date = datetime(
-                                int(date_match.group(1)),
-                                int(date_match.group(2)),
-                                int(date_match.group(3))
-                            )
+                # 2. 从 daily_summaries 表获取摘要表大小（如有）
+                try:
+                    cur.execute("SELECT pg_total_relation_size('daily_summaries')")
+                    summary_size = cur.fetchone()[0] or 0
+                except:
+                    summary_size = 0  # 表可能不存在
 
-                            if oldest_record is None or folder_date < oldest_record:
-                                oldest_record = folder_date
-                            if latest_record is None or folder_date > latest_record:
-                                latest_record = folder_date
+                total_storage = news_table_size + summary_size
 
-                    except:
-                        pass
+                # 3. 转换日期格式
+                oldest_str = oldest_record.strftime("%Y-%m-%d") if oldest_record else None
+                latest_str = latest_record.strftime("%Y-%m-%d") if latest_record else None
 
-                    # 计算存储大小
-                    for item in date_folder.rglob("*"):
-                        if item.is_file():
-                            total_storage += item.stat().st_size
-
-        # 读取版本信息
-        version_file = self.parser.project_root / "version"
+        # 4. 获取版本信息（保留文件读取，因版本文件与数据库无关）
         version = "unknown"
+        version_file = self.project_root / "version"
         if version_file.exists():
             try:
                 with open(version_file, "r") as f:
@@ -589,16 +491,19 @@ class DataService:
             except:
                 pass
 
+        # 5. 构建返回结果
         return {
             "system": {
                 "version": version,
-                "project_root": str(self.parser.project_root)
+                "project_root": str(self.project_root),
+                "database": self.db_url.split("@")[-1] if self.db_url else "unknown"
             },
             "data": {
+                "total_news": total_news,
                 "total_storage": f"{total_storage / 1024 / 1024:.2f} MB",
-                "oldest_record": oldest_record.strftime("%Y-%m-%d") if oldest_record else None,
-                "latest_record": latest_record.strftime("%Y-%m-%d") if latest_record else None,
+                "oldest_record": oldest_str,
+                "latest_record": latest_str,
             },
-            "cache": self.cache.get_stats(),
-            "health": "healthy"
+            "cache": getattr(self, 'cache', None).get_stats() if hasattr(self, 'cache') else {},
+            "health": "healthy" if total_news > 0 else "no_data"
         }

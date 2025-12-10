@@ -6,6 +6,7 @@ TrendRadar MCP Server - FastMCP 2.0 实现
 """
 
 import json
+import os 
 from typing import List, Optional, Dict
 
 from fastmcp import FastMCP
@@ -28,8 +29,12 @@ _tools_instances = {}
 
 def _get_tools(project_root: Optional[str] = None):
     """获取或创建工具实例（单例模式）"""
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise ValueError(f"DATABASE_URL 未设置，请提供 db_url 或设置环境变量，当前环境变量为{os.environ}")
+    
     if not _tools_instances:
-        _tools_instances['data'] = DataQueryTools(project_root)
+        _tools_instances['data'] = DataQueryTools(project_root, db_url)
         _tools_instances['analytics'] = AnalyticsTools(project_root)
         _tools_instances['search'] = SearchTools(project_root)
         _tools_instances['config'] = ConfigManagementTools(project_root)

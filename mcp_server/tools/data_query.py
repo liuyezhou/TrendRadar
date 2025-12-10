@@ -22,14 +22,14 @@ from ..utils.errors import MCPError
 class DataQueryTools:
     """数据查询工具类"""
 
-    def __init__(self, project_root: str = None):
+    def __init__(self, project_root: str = None, db_url: str = None):
         """
         初始化数据查询工具
 
         Args:
             project_root: 项目根目录
         """
-        self.data_service = DataService(project_root)
+        self.data_service = DataService(project_root, db_url)
 
     def get_latest_news(
         self,
