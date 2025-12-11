@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
 
     networks:
-      - mcpnet
+      - sharednet
     ports:
       - "127.0.0.1:${WEBSERVER_PORT:-8080}:${WEBSERVER_PORT:-8080}"
 
@@ -30,7 +30,7 @@ services:
       # 多账号配置
       - MAX_ACCOUNTS_PER_CHANNEL=${MAX_ACCOUNTS_PER_CHANNEL:-}
       # 数据库配置
-      - DATABASE_URL=${DATABASE_URL:-}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@news-db:${POSTGRES_PORT}/${POSTGRES_DB}
       # 推送时间窗口
       - PUSH_WINDOW_ENABLED=${PUSH_WINDOW_ENABLED:-}
       - PUSH_WINDOW_START=${PUSH_WINDOW_START:-}
@@ -83,3 +83,7 @@ services:
   #   environment:
   #     - TZ=Asia/Shanghai
   #     - DATABASE_URL=${DATABASE_URL:-}
+
+networks:
+  sharednet:
+    external: true

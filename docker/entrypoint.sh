@@ -7,13 +7,14 @@ if [ ! -f "/app/config/config.yaml" ] || [ ! -f "/app/config/frequency_words.txt
     exit 1
 fi
 
+echo "数据库db url为${DATABASE_URL}"
 # 保存环境变量
 env >> /etc/environment
 
 case "${RUN_MODE:-cron}" in
 "once")
     echo "🔄 单次执行"
-    exec /usr/local/bin/python main.py
+    exec /usr/local/bin/python -m src.main
     ;;
 "cron")
     # 生成 crontab
@@ -21,7 +22,7 @@ case "${RUN_MODE:-cron}" in
     {
     for rule in "${RULES[@]}"; do
         rule="$(echo "$rule" | xargs)"  # 去掉前后空格
-        echo "$rule cd /app && /usr/local/bin/python main.py"
+        echo "$rule cd /app && /usr/local/bin/python -m  src.main"
     done
     } > /tmp/crontab
 
@@ -37,7 +38,7 @@ case "${RUN_MODE:-cron}" in
     # 立即执行一次（如果配置了）
     if [ "${IMMEDIATE_RUN:-false}" = "true" ]; then
         echo "▶️ 立即执行一次"
-        /usr/local/bin/python main.py
+        /usr/local/bin/python -m  src.main
     fi
 
     # 启动 Web 服务器（如果配置了）
