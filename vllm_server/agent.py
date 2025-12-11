@@ -56,8 +56,8 @@ class MCPClient:
         # 定义 MCP 服务器的启动参数
         server_params = StdioServerParameters(
             command="python", # 启动服务器的命令
-            args=MCP_CMD, # 服务器脚本路径作为参数
-            env=None # 环境变量
+            args=MCP_CMD,    # 服务器脚本路径作为参数
+            env=os.environ  # 环境变量
         )
 
         # 启动 MCP 服务器并建立通信通道
@@ -66,8 +66,7 @@ class MCPClient:
         self.stdio, self.write = stdio_transport # 获取标准输入和输出流
         # 创建 MCP 客户端会话
         self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-        await self.session.initialize() # 初始化会话
-
+        response = await self.session.initialize() # 初始化会话
         # 列出 MCP 服务器上注册的所有工具
         response = await self.session.list_tools()
         tools = response.tools

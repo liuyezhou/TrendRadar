@@ -5,6 +5,8 @@ services:
     image: vllm/vllm-openai:latest  # vLLM >=0.5.0 支持 AWQ
     restart: "no"                   # 由于定时总结新闻，不需要vllm service 常驻
     runtime: nvidia
+    networks:
+      - sharednet
     ports:
       - "8000:8000"
     environment:
@@ -36,10 +38,17 @@ services:
       dockerfile: vllm_server/Dockerfile
     env_file: ../docker/.env
     restart: "no"
-    ports:
-      - "8080:8080"
+    networks:
+      - sharednet
     volumes:
       - ../output:/TrendRadar/output:ro   # 只读挂载（推荐）
     depends_on:
       vllm:
         condition: service_healthy
+    environment:
+      - TZ=Asia/Shanghai
+  
+networks:
+  sharednet:
+    external: true
+
