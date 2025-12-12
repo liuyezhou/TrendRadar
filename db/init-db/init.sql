@@ -7,12 +7,16 @@ CREATE TABLE IF NOT EXISTS news_items (
     source_name TEXT NOT NULL,
     source_id TEXT NOT NULL,
     crawl_count INTEGER NOT NULL DEFAULT 1,
+    batch_id INTEGER NOT NULL DEFAULT 1,
     rank INT[], 
     category TEXT,          -- 可为空
     summary TEXT,           -- 可为空
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 创建序列（用于手动控制批次号）
+CREATE SEQUENCE news_batch_seq START 1;
 
 -- 创建索引
 CREATE INDEX idx_news_url ON news_items(url);
@@ -34,7 +38,13 @@ CREATE TRIGGER update_news_articles_modtime
 BEFORE UPDATE ON news_items
 FOR EACH ROW EXECUTE FUNCTION update_modified_column();
 
+-- 添加限制
+ADD CONSTRAINT uk_news_items_source_title 
+UNIQUE (source_id, title);
+
+-- ////////////////
 -- 创建新闻总结表
+-- ///////////////
 CREATE TABLE daily_summaries (
     id BIGSERIAL PRIMARY KEY,
     summary_date DATE NOT NULL,                     -- 总结日期（如 2025-12-09）

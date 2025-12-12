@@ -17,3 +17,7 @@ class NewsItemRepository(ABC):
     def get_latest_new_titles(self, platform_ids: Optional[List[str]] = None) -> Dict:
         """检测最新批次中的新增标题"""
         pass
+    
+    @abstractmethod
+    def is_first_crawl_today(self) -> bool:
+        pass

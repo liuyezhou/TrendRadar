@@ -18,3 +18,8 @@ def detect_latest_new_titles(current_platform_ids: Optional[List[str]] = None) -
     if _repo is None:
         raise RuntimeError("Repository not initialized")
     return _repo.get_latest_new_titles(current_platform_ids)
+
+def is_first_crawl_today() -> bool:
+    if _repo is None:
+        raise RuntimeError("Repository not initialized")
+    return _repo.is_first_crawl_today()

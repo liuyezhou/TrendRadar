@@ -4,8 +4,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 from ..config import CONFIG
 from .word_matcher import matches_word_groups
-from ..utils.text import clean_title
-from ..utils.time import is_first_crawl_today
+from ..core.history import is_first_crawl_today
 
 def calculate_news_weight(
     title_data: Dict[str, Any], rank_threshold: int = CONFIG["RANK_THRESHOLD"]

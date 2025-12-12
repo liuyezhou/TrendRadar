@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
 from ..config import CONFIG
-from ..utils.time import get_beijing_time, is_first_crawl_today
+from ..utils.time import get_beijing_time, format_time_filename
 from ..utils.file import ensure_directory_exists, save_titles_to_file
 from ..utils.version import check_version_update
 from .fetcher import DataFetcher
@@ -55,6 +55,7 @@ class NewsAnalyzer:
         self.request_interval = CONFIG["REQUEST_INTERVAL"]
         self.report_mode = CONFIG["REPORT_MODE"]
         self.rank_threshold = CONFIG["RANK_THRESHOLD"]
+        self.generate_html_file = CONFIG["GENERATE_HTML_FILE"]
         self.is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
         self.is_docker_container = self._detect_docker_environment()
         self.update_info = None
@@ -220,6 +221,7 @@ class NewsAnalyzer:
         failed_ids: Optional[List] = None,
         is_daily_summary: bool = False,
         global_filters: Optional[List[str]] = None,
+        generate_html_file: bool = False
     ) -> Tuple[List[Dict], str]:
         """统一的分析流水线：数据处理 → 统计计算 → HTML生成"""
 
@@ -237,17 +239,18 @@ class NewsAnalyzer:
         )
 
         # HTML生成
-        html_file = generate_html_report(
-            stats,
-            total_titles,
-            failed_ids=failed_ids,
-            new_titles=new_titles,
-            id_to_name=id_to_name,
-            mode=mode,
-            is_daily_summary=is_daily_summary,
-            update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
-        )
-
+        html_file = None
+        if generate_html_file:
+            html_file = generate_html_report(
+                stats,
+                total_titles,
+                failed_ids=failed_ids,
+                new_titles=new_titles,
+                id_to_name=id_to_name,
+                mode=mode,
+                is_daily_summary=is_daily_summary,
+                update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
+            )
         return stats, html_file
 
     def _send_notification_if_needed(
@@ -328,9 +331,11 @@ class NewsAnalyzer:
             id_to_name,
             is_daily_summary=True,
             global_filters=global_filters,
+            generate_html_file=self.generate_html_file
         )
 
-        print(f"{summary_type}报告已生成: {html_file}")
+        if self.generate_html_file:
+            print(f"{summary_type}报告已生成: {html_file}")
 
         # 发送通知
         self._send_notification_if_needed(
@@ -370,6 +375,7 @@ class NewsAnalyzer:
             id_to_name,
             is_daily_summary=True,
             global_filters=global_filters,
+            generate_html_file=True
         )
 
         print(f"{summary_type}HTML已生成: {html_file}")
@@ -415,8 +421,8 @@ class NewsAnalyzer:
             ids, self.request_interval
         )
 
-        title_file = save_titles_to_file(results, id_to_name, failed_ids)
-        print(f"标题已保存到: {title_file}")
+        save_success = save_titles_to_file(results, id_to_name, failed_ids)
+        print(f"标题保存是否成功：{save_success}")
 
         return results, id_to_name, failed_ids
 
@@ -428,7 +434,7 @@ class NewsAnalyzer:
         current_platform_ids = [platform["id"] for platform in CONFIG["PLATFORMS"]]
 
         new_titles = detect_latest_new_titles(current_platform_ids)
-        time_info = Path(save_titles_to_file(results, id_to_name, failed_ids)).stem
+        time_info = Path(format_time_filename()).stem
         word_groups, filter_words, global_filters = load_frequency_words()
 
         # current模式下，实时推送需要使用完整的历史数据来保证统计信息的完整性
@@ -460,11 +466,12 @@ class NewsAnalyzer:
                     historical_id_to_name,
                     failed_ids=failed_ids,
                     global_filters=global_filters,
+                    generate_html_file=self.generate_html_file
                 )
-
+                if self.generate_html_file:
+                    print(f"HTML报告已生成: {html_file}")
+                    
                 combined_id_to_name = {**historical_id_to_name, **id_to_name}
-
-                print(f"HTML报告已生成: {html_file}")
 
                 # 发送实时通知（使用完整历史数据的统计结果）
                 summary_html = None
@@ -493,8 +500,10 @@ class NewsAnalyzer:
                 id_to_name,
                 failed_ids=failed_ids,
                 global_filters=global_filters,
+                generate_html_file=self.generate_html_file
             )
-            print(f"HTML报告已生成: {html_file}")
+            if self.generate_html_file:
+                print(f"HTML报告已生成: {html_file}")
 
             # 发送实时通知（如果需要）
             summary_html = None

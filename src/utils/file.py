@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional
 from .text import clean_title
-from .time import format_time_filename
 from ..repository.abc import NewsItemRepository
 
 from ..utils.time import get_beijing_time
@@ -117,9 +116,13 @@ def save_titles_to_file(results: Dict, id_to_name: Dict, failed_ids: List) -> st
 
 
     # 2. 保存到数据库
-    _repo.save_batch(news_items)
+    try:
+        _repo.save_batch(news_items)
+        return True
+    except:
+        print("保存到数据库出错！")
 
     # # 3. （可选）仍生成 .txt 文件用于调试
     # txt_path = save_titles_to_txt(results, id_to_name, failed_ids)
     # return txt_path  # 保持接口不变
-    return format_time_filename()
+    return False

@@ -127,6 +127,7 @@ def load_config():
         "REPORT_MODE": os.environ.get("REPORT_MODE", "").strip()
         or config_data["report"]["mode"],
         "RANK_THRESHOLD": config_data["report"]["rank_threshold"],
+        "GENERATE_HTML_FILE": config_data["report"]["generate_html_file"],
         "SORT_BY_POSITION_FIRST": os.environ.get("SORT_BY_POSITION_FIRST", "").strip().lower()
         in ("true", "1")
         if os.environ.get("SORT_BY_POSITION_FIRST", "").strip()

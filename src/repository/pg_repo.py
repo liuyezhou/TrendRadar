@@ -8,79 +8,67 @@ from ..utils.time import get_beijing_time
 class PostgreSQLNewsRepository(NewsItemRepository):
     def __init__(self, db_url: str):
         self.db_url = db_url
-        self._init_db()
 
     def _get_conn(self):
         return psycopg.connect(self.db_url, row_factory=dict_row)
 
-    def _init_db(self):
+    def save_batch(self, news_items: List[Dict]) -> int:
+        """
+        保存一批新闻，返回本次使用的 batch_id
+        - 新闻首次出现：使用当前 batch_id
+        - 新闻已存在：保留原始 batch_id，仅更新 updated_at 和其他字段
+        """
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 获取新批次号
+                cur.execute("SELECT nextval('news_batch_seq')")
+                batch_id = cur.fetchone()['nextval']
+
+                now = get_beijing_time()
+                for item in news_items:
+                    cur.execute("""
+                        INSERT INTO news_items (
+                            title, url, mobile_url, source_name, source_id,
+                            crawl_count, rank, batch_id, created_at, updated_at
+                        ) VALUES (
+                            %(title)s, %(url)s, %(mobile_url)s, %(source_name)s, %(source_id)s,
+                            1, %(ranks)s, %(batch_id)s, %(now)s, %(now)s
+                        )
+                        ON CONFLICT (source_id, title)
+                        DO UPDATE SET
+                            crawl_count = news_items.crawl_count + 1,
+                            rank = news_items.rank || EXCLUDED.rank,
+                            updated_at = %(now)s,
+                            batch_id = news_items.batch_id 
+                    """, {
+                        'title': item['title'],
+                        'url': item.get('url'),
+                        'mobile_url': item.get('mobileUrl'),
+                        'source_name': item['source_name'],
+                        'source_id': item['source_id'],
+                        'ranks': item.get('ranks', []),
+                        'batch_id': batch_id,
+                        'now': now
+                    })
+                return batch_id
+
+    def is_first_crawl_today(self) -> bool:
+        """
+        判断是否是当天第一次爬取（基于数据库）
+        Returns:
+            True: 今天尚无新闻记录（是首次爬取）
+            False: 今天已有新闻
+        """
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS news_items (
-                        id BIGSERIAL PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        mobile_url TEXT,
-                        source_name TEXT NOT NULL,
-                        source_id TEXT NOT NULL,
-                        crawl_count INTEGER NOT NULL DEFAULT 1,
-                        rank INT[], 
-                        category TEXT,
-                        summary TEXT,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_news_source_title ON news_items (source_id, title);
-                    CREATE INDEX IF NOT EXISTS idx_news_created ON news_items (created_at DESC);
+                    SELECT 1
+                    FROM news_items
+                    WHERE created_at >= CURRENT_DATE
+                    LIMIT 1
                 """)
-                conn.commit()
-
-    def save_batch(self, news_items: List[Dict]) -> None:
-        """用于保存爬取的每日新闻标题"""
-        now = get_beijing_time()
-        with self._get_conn() as conn:
-            with conn.cursor() as cur:
-                for item in news_items:
-                    new_ranks = item.get('ranks', [])  # 本次抓取的排名列表
-                    
-                    # 尝试更新（合并 ranks）
-                    cur.execute("""
-                        UPDATE news_items
-                        SET 
-                            crawl_count = crawl_count + 1,
-                            rank = ARRAY(
-                                SELECT DISTINCT UNNEST(rank || %s)
-                                ORDER BY 1
-                            ),
-                            updated_at = %s,
-                            url = COALESCE(%s, url),
-                            mobile_url = COALESCE(%s, mobile_url)
-                        WHERE source_id = %s AND title = %s
-                        RETURNING id
-                    """, (new_ranks, now, item.get('url'), item.get('mobileUrl'), 
-                        item['source_id'], item['title']))
-                    
-                    if cur.fetchone() is None:
-                        # 不存在，插入新记录
-                        cur.execute("""
-                            INSERT INTO news_items (
-                                title, url, mobile_url, source_name, source_id,
-                                rank, category, summary, created_at, updated_at
-                            ) VALUES (
-                                %(title)s, %(url)s, %(mobile_url)s, %(source_name)s, %(source_id)s,
-                                %(ranks)s, NULL, NULL, %(now)s, %(now)s
-                            )
-                        """, {
-                            'title': item['title'],
-                            'url': item.get('url'),
-                            'mobile_url': item.get('mobileUrl'),
-                            'source_name': item['source_name'],
-                            'source_id': item['source_id'],
-                            'ranks': new_ranks,  # 直接存 list → int[]
-                            'now': now
-                        })
-
+                return cur.fetchone() is None           
+            
     def get_all_today(self, platform_ids: Optional[List[str]] = None) -> Tuple[Dict, Dict, Dict]:
         """兼容原始接口：返回 (all_results, id_to_name, title_info)"""
         with self._get_conn() as conn:
@@ -98,7 +86,7 @@ class PostgreSQLNewsRepository(NewsItemRepository):
                     ORDER BY created_at, source_id, title
                 """, params)
                 rows = cur.fetchall()
-
+        
         # 构建兼容结构
         all_results = {}
         id_to_name = {}
@@ -133,46 +121,58 @@ class PostgreSQLNewsRepository(NewsItemRepository):
         return all_results, id_to_name, title_info
 
     def get_latest_new_titles(self, platform_ids: Optional[List[str]] = None) -> Dict:
-        """检测最新批次中的新增标题（对比历史）"""
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                # 获取今天所有标题集合
-                where_clause = "created_at >= CURRENT_DATE"
-                params = platform_ids or []
+                # 1. 构建 WHERE 条件
+                where_clause = "1=1"
+                params = []
                 if platform_ids:
                     placeholders = ','.join(['%s'] * len(platform_ids))
                     where_clause += f" AND source_id = ANY(ARRAY[{placeholders}])"
+                    params = platform_ids
 
-                cur.execute(f"SELECT source_id, title FROM news_items WHERE {where_clause}", params)
-                all_today = set((r['source_id'], r['title']) for r in cur.fetchall())
+                # 2. 获取最新 batch_id
+                cur.execute("SELECT last_value FROM news_batch_seq")
+                latest_batch = cur.fetchone()['last_value']
 
-                # 获取历史标题（昨天及之前）
-                cur.execute(f"SELECT source_id, title FROM news_items WHERE created_at < CURRENT_DATE")
-                historical = set((r['source_id'], r['title']) for r in cur.fetchall())
+                # 3. 获取最新批次的 (source_id, title)
+                cur.execute(f"""
+                    SELECT source_id, title
+                    FROM news_items
+                    WHERE {where_clause} AND batch_id = %s
+                """, params + [latest_batch])
+                latest_set = set((r['source_id'], r['title']) for r in cur.fetchall())
+                if len(latest_set) == 0:
+                    return {}
+    
 
-                # 新增 = 今天 - 历史
-                new_set = all_today - historical
+                # 6. ✅ 正确查询完整字段
+                values_clauses = []
+                query_params = [latest_batch]
+                for sid, title in latest_set:
+                    values_clauses.append("(%s, %s)")
+                    query_params.extend([sid, title])
 
-                # 构建返回结构
+                values_sql = ",".join(values_clauses)
+                cur.execute(f"""
+                    SELECT source_id, title, url, mobile_url, rank
+                    FROM news_items
+                    WHERE batch_id = %s
+                    AND (source_id, title) = ANY (VALUES {values_sql})
+                """, query_params)
+
                 new_titles = {}
-                for sid, title in new_set:
+                for row in cur.fetchall():
+                    sid = row['source_id']
                     if sid not in new_titles:
                         new_titles[sid] = {}
-                    # 查询完整数据
-                    cur.execute("""
-                        SELECT url, mobile_url, crawl_count
-                        FROM news_items
-                        WHERE source_id = %s AND title = %s AND created_at >= CURRENT_DATE
-                        ORDER BY created_at DESC LIMIT 1
-                    """, (sid, title))
-                    row = cur.fetchone()
-                    new_titles[sid][title] = {
-                        'ranks': [row['crawl_count']] if row else [1],
-                        'url': row['url'] if row else '',
-                        'mobileUrl': row['mobile_url'] if row else '',
+                    new_titles[sid][row['title']] = {
+                        'ranks': row['rank'],
+                        'url': row['url'] or '',
+                        'mobileUrl': row['mobile_url'] or '',
                     }
                 return new_titles
-
+            
     # -----------------------------------------
     # ----------- 新闻总结 ---------------------
     # -----------------------------------------
@@ -238,3 +238,9 @@ class PostgreSQLNewsRepository(NewsItemRepository):
                     ORDER BY summary_date DESC
                 """, (days, model_name, summary_type))
                 return cur.fetchall()
+
+
+if __name__ == "__main__":
+    import os
+    db = PostgreSQLNewsRepository(os.getenv("DATABASE_URL"))
+    db.get_latest_new_titles()
